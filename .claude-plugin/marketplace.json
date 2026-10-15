@@ -1,0 +1,15 @@
+{
+  "name": "agent-callback",
+  "owner": {
+    "name": "akashmony01",
+    "url": "https://github.com/akashmony01"
+  },
+  "plugins": [
+    {
+      "name": "agent-callback",
+      "source": ".",
+      "description": "Desktop notification + chime bursts when Claude Code is waiting on you."
+    }
+  ],
+  "description": "agent-callback: get called back to your AI coding agent when it is waiting on you."
+}

@@ -1,0 +1,19 @@
+{
+  "name": "agent-callback",
+  "version": "0.1.0",
+  "description": "Calls you back to Claude Code when it's waiting on you: a desktop notification plus gentle bursts of chimes, a distinct sound per session, silent when you're away.",
+  "author": {
+    "name": "akashmony01",
+    "url": "https://github.com/akashmony01"
+  },
+  "homepage": "https://github.com/akashmony01/agent-callback",
+  "repository": "https://github.com/akashmony01/agent-callback",
+  "license": "MIT",
+  "keywords": [
+    "notification",
+    "sound",
+    "alert",
+    "idle",
+    "permission"
+  ]
+}

@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+# agent-callback — call you back to your AI coding agent.
+#
+# When an agent (Claude Code, Codex, Cursor, ...) is waiting on you, show a
+# desktop notification and play short bursts of chimes, each session with its
+# own sound. Stops as soon as you respond. Works on Linux (GNOME) and macOS.
+#
+# Usage:
+#   agent-callback start [--session ID] [--cwd DIR] [--message TEXT] [--app NAME]
+#   agent-callback stop  [--session ID] [--end]   stop one session (--end also frees its sound)
+#   agent-callback hush                            stop every session
+#   agent-callback status                          list sessions and what they're doing
+#
+# Without --session, the current terminal tab is used as the session.
+#
+# Settings (environment variables):
+#   AGENT_CALLBACK_SOUND          force one sound for every session (name or file path)
+#   AGENT_CALLBACK_DELAY          grace period before alerting, seconds (default 10)
+#   AGENT_CALLBACK_SCHEDULE       "wait:duration" seconds per burst (default "0:30 300:60 600:90")
+#   AGENT_CALLBACK_AWAY_SECONDS   idle this long = away; skip bursts after the first (default 900)
+#   AGENT_CALLBACK_MAX_SECONDS    give up entirely after this many seconds (default 3600)
+#   AGENT_CALLBACK_STATE_DIR      where per-session state lives (default ~/.local/state/agent-callback)
+#   AGENT_CALLBACK_EDITOR         editor CLI to focus on click (auto: code, cursor, codium, windsurf)
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+LIB_DIR="$(dirname "$(dirname "$SELF")")/lib"
+STATE_ROOT="${AGENT_CALLBACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-callback}"
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  SOUNDS=(Glass Sosumi Ping Pop Funk Hero)
+  SOUND_DIR="/System/Library/Sounds"; SOUND_EXT="aiff"
+else
+  SOUNDS=(bell complete message-new-instant phone-incoming-call dialog-warning window-attention)
+  SOUND_DIR="/usr/share/sounds/freedesktop/stereo"; SOUND_EXT="oga"
+fi
+
+# ---------------------------------------------------------------- helpers
+
+# Play one file, cut off after ~1.5s so every chime is short.
+play_once() {
+  local cap=()
+  command -v timeout >/dev/null && cap=(timeout 1.5)
+  if command -v afplay >/dev/null; then "${cap[@]}" afplay "$1"
+  elif command -v pw-play >/dev/null; then "${cap[@]}" pw-play "$1"
+  elif command -v paplay >/dev/null; then "${cap[@]}" paplay "$1"
+  elif command -v aplay >/dev/null; then "${cap[@]}" aplay -q "$1"
+  else printf '\a' >/dev/tty 2>/dev/null; fi
+}
+
+resolve_sound() {
+  if [[ -f "$1" ]]; then echo "$1"; else echo "$SOUND_DIR/$1.$SOUND_EXT"; fi
+}
+
+# Seconds since the last keyboard/mouse input (0 if unknown).
+idle_seconds() {
+  local ms
+  if [[ "$(uname)" == "Darwin" ]]; then
+    ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print int($NF / 1000000000); exit}'
+    return
+  fi
+  ms=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
+         --object-path /org/gnome/Mutter/IdleMonitor/Core \
+         --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null \
+       | sed -n 's/.*uint64 \([0-9]*\).*/\1/p')
+  echo $(( ${ms:-0} / 1000 ))
+}
+
+# True while the screen is locked (GNOME). Unknown counts as unlocked.
+screen_locked() {
+  [[ "$(uname)" == "Darwin" ]] && return 1
+  gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.GetActive 2>/dev/null | grep -q true
+}
+
+# GNOME Terminal tab running this process (used to jump back on click).
+terminal_tab_id() {
+  local id="${GNOME_TERMINAL_SCREEN##*/}"
+  echo "${id//_/-}"
+}
+
+# Code editors whose built-in terminal we can jump back to. The binary that
+# hosts the terminal has the same name as the editor's command-line launcher,
+# and all are VS Code based, so "<cli> <folder>" brings the window with that
+# folder to the front.
+EDITORS="code code-insiders cursor codium windsurf"
+
+# Editor whose terminal runs this process (empty for a plain terminal).
+# Found by walking up the process tree to the editor's own binary.
+host_editor() {
+  [[ -n "$AGENT_CALLBACK_EDITOR" ]] && { echo "$AGENT_CALLBACK_EDITOR"; return; }
+  [[ "$(uname)" == "Darwin" ]] && return 0
+  local pid=$$ name
+  while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )); do
+    name=$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null)")
+    [[ -n "$name" && " $EDITORS " == *" $name "* ]] && { echo "$name"; return; }
+    pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null)
+  done
+}
+
+# agent-callback __focus <editor-cli> <folder>  (run when the notification is clicked)
+# Bring the editor window holding <folder> to the front. Window titles look
+# like "file - project - Visual Studio Code", so find the deepest folder
+# (from <folder> upwards) named in one of the editor's window titles and open
+# that: the editor focuses the window that already has it. No match means the
+# project isn't open (or titles can't be read), and we do nothing rather than
+# open a new window.
+focus_editor() {
+  local cli="$1" dir="$2" titles="" w class
+  command -v "$cli" >/dev/null && command -v xprop >/dev/null || return 0
+  local key="${cli%-insiders}"; key="${key/codium/vscodium}"
+  for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -o '0x[0-9a-f]*'); do
+    class=$(xprop -id "$w" WM_CLASS 2>/dev/null)
+    [[ "$(tr 'A-Z' 'a-z' <<<"$class")" == *"$key"* ]] || continue
+    titles+=$'\n'$(xprop -id "$w" _NET_WM_NAME 2>/dev/null | sed -n 's/^[^"]*"\(.*\)"$/ - \1 - /p')
+  done
+  while [[ "$dir" == /?* ]]; do
+    if [[ "$titles" == *" - ${dir##*/} - "* || "$titles" == *" - ${dir##*/} (Workspace) - "* ]]; then
+      setsid "$cli" "$dir" </dev/null >/dev/null 2>&1 &
+      return 0
+    fi
+    dir="${dir%/*}"
+  done
+}
+
+# Session IDs become directory names: keep them safe.
+sanitize() { tr -cd 'A-Za-z0-9_-' <<<"$1"; }
+
+# True if PID $1 is still running a command matching regex $2. PID files can
+# go stale and the OS reuses PIDs, so never kill a recorded PID blindly.
+is_ours() {
+  [[ "$1" =~ ^[0-9]+$ ]] && ps -o args= -p "$1" 2>/dev/null | grep -qE "$2"
+}
+
+# Notification title: the session's folder, home shortened to ~. If it's too
+# long, keep the end of the path (the most telling part): "…/clients/acme/web".
+folder_title() {
+  local title="$1" max=40
+  [[ -z "$title" ]] && { echo "$2"; return; }
+  [[ "$title" == "$HOME"* ]] && title="~${title#"$HOME"}"
+  while (( ${#title} > max )) && [[ "$title" == */*/* ]]; do
+    title="${title#…/}"     # drop the marker we added last round
+    title="…/${title#*/}"   # drop the leading folder, mark the cut
+  done
+  (( ${#title} > max )) && title="…${title: -$((max - 1))}"
+  echo "$title"
+}
+
+# Pick a sound for a new session: the first one no live session holds; once
+# all are taken, cycle by count. Caller holds the lock.
+pick_sound() {
+  local in_use count s
+  in_use=$(cat "$STATE_ROOT"/*/sound 2>/dev/null)
+  count=$(printf '%s\n' "$in_use" | grep -c .)
+  for s in "${SOUNDS[@]}"; do
+    grep -qx "$s" <<<"$in_use" || { echo "$s"; return; }
+  done
+  echo "${SOUNDS[$(( count % ${#SOUNDS[@]} ))]}"
+}
+
+# Forget sessions that ended without "stop --end" (untouched for a day and
+# nothing running), so they don't keep holding a sound.
+prune_stale() {
+  local old f p busy
+  for old in $(find "$STATE_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[A-Za-z0-9_-]*' -mmin +1440 2>/dev/null); do
+    busy=0
+    for f in loop.pid notify.pid; do
+      p=$(cat "$old/$f" 2>/dev/null); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && busy=1
+    done
+    (( busy )) || rm -rf "$old"
+  done
+}
+
+stop_dir() {
+  local dir="$1" loop player notifier
+  loop=$(cat "$dir/loop.pid" 2>/dev/null)
+  player=$(cat "$dir/player.pid" 2>/dev/null)
+  notifier=$(cat "$dir/notify.pid" 2>/dev/null)
+  if is_ours "$loop" 'agent-callback __loop'; then
+    kill "$loop" 2>/dev/null
+    pkill -P "$loop" 2>/dev/null   # any afplay/pw-play/sleep child
+  fi
+  is_ours "$player" 'afplay|pw-play|paplay|aplay|timeout' && kill "$player" 2>/dev/null
+  # Close the desktop notification too (the notifier closes it on SIGTERM).
+  is_ours "$notifier" 'agent-callback-notify\.py' && kill "$notifier" 2>/dev/null
+  rm -f "$dir/loop.pid" "$dir/player.pid" "$dir/notify.pid"
+}
+
+# ---------------------------------------------------------------- background loop
+# agent-callback __loop <dir> <sound-file> <title> <body> <tab-id> <app> <editor> <cwd>
+run_loop() {
+  local dir="$1" file="$2" title="$3" body="$4" tab_id="$5" app="$6" editor="$7" cwd="$8"
+  local me=$$ max delay away burst step wait_s dur end remaining
+  max="${AGENT_CALLBACK_MAX_SECONDS:-3600}"; [[ "$max" =~ ^[0-9]+$ ]] || max=3600
+  local deadline=$(( $(date +%s) + max ))
+  # shellcheck disable=SC2064
+  trap "kill \"\$(cat '$dir/player.pid' 2>/dev/null)\" 2>/dev/null
+        [[ \"\$(cat '$dir/loop.pid' 2>/dev/null)\" == '$me' ]] && rm -f '$dir/loop.pid'
+        exit 0" TERM INT
+  pause() { sleep "$1" & wait $!; }   # interruptible by "stop"
+
+  # Grace period: respond within this and nothing happens at all.
+  delay="${AGENT_CALLBACK_DELAY:-10}"
+  [[ "$delay" =~ ^[0-9]+$ ]] && (( delay > 0 )) && pause "$delay"
+
+  # Persistent notification. When you close it or click it, the notifier
+  # exits 0 and we silence this session. "stop" sends it SIGTERM, which
+  # makes it close the popup itself (GNOME only lets the creator close it).
+  if [[ "$(uname)" != "Darwin" ]] && python3 -c 'import gi' 2>/dev/null; then
+    local on_click=()
+    [[ -n "$editor" ]] && on_click=("$SELF" __focus "$editor" "$cwd")
+    (
+      python3 "$LIB_DIR/agent-callback-notify.py" "$dir/notify.pid" "$app" "$title" "$body" "$tab_id" "${on_click[@]}" \
+        2>"$dir/notify.err" \
+        && [[ "$(cat "$dir/loop.pid" 2>/dev/null)" == "$me" ]] && kill -TERM "$me" 2>/dev/null
+    ) &
+  elif command -v osascript >/dev/null; then
+    osascript -e "display notification \"${body//[\"\\]/}\" with title \"${title//[\"\\]/}\" subtitle \"${app//[\"\\]/}\"" >/dev/null 2>&1
+  fi
+
+  away="${AGENT_CALLBACK_AWAY_SECONDS:-900}"; [[ "$away" =~ ^[0-9]+$ ]] || away=900
+  burst=0
+  for step in ${AGENT_CALLBACK_SCHEDULE:-0:30 300:60 600:90}; do
+    wait_s="${step%%:*}"; dur="${step##*:}"
+    [[ "$wait_s" =~ ^[0-9]+$ && "$dur" =~ ^[0-9]+$ ]] || continue
+    (( wait_s > 0 )) && pause "$wait_s"
+    (( $(date +%s) < deadline )) || break
+    burst=$(( burst + 1 ))
+    screen_locked && continue                                    # locked = left, stay silent
+    (( burst > 1 && $(idle_seconds) >= away )) && continue       # long idle = away
+    end=$(( $(date +%s) + dur ))
+    while (( $(date +%s) < end )) && ! screen_locked; do
+      play_once "$file" &
+      echo $! > "$dir/player.pid"
+      wait $!
+      rm -f "$dir/player.pid"
+      pause 1
+    done
+  done
+
+  # Bursts done: stay quietly alive (so repeat events don't restart them)
+  # until the notification is closed, the session resumes, or max time.
+  remaining=$(( deadline - $(date +%s) ))
+  (( remaining > 0 )) && pause "$remaining"
+  [[ "$(cat "$dir/loop.pid" 2>/dev/null)" == "$me" ]] && rm -f "$dir/loop.pid"
+  exit 0
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_start() {
+  local session="" cwd="$PWD" message="Waiting for your input" app="AI agent"
+  while (( $# )); do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      --cwd)     cwd="$2"; shift 2 ;;
+      --message) message="$2"; shift 2 ;;
+      --app)     app="$2"; shift 2 ;;
+      *) echo "agent-callback: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  session=$(sanitize "${session:-$(terminal_tab_id)}"); session="${session:-default}"
+  local dir="$STATE_ROOT/$session" pid sound lock
+  mkdir -p "$dir"
+
+  # Already alerting for this session? Leave it alone.
+  pid=$(cat "$dir/loop.pid" 2>/dev/null)
+  is_ours "$pid" 'agent-callback __loop' && return 0
+
+  # This session's sound (sticky for the life of the session).
+  if [[ -n "$AGENT_CALLBACK_SOUND" ]]; then
+    sound="$AGENT_CALLBACK_SOUND"
+  elif [[ -s "$dir/sound" ]]; then
+    sound=$(cat "$dir/sound")
+  else
+    # Portable lock (mkdir is atomic) so simultaneous sessions don't pick the same slot.
+    lock="$STATE_ROOT/.lock"
+    for _ in {1..20}; do mkdir "$lock" 2>/dev/null && break; sleep 0.1; done
+    prune_stale
+    sound=$(pick_sound)
+    echo "$sound" > "$dir/sound"
+    rmdir "$lock" 2>/dev/null
+  fi
+
+  # Where to send you on click: the editor window (VS Code, Cursor, ...) when
+  # running in an editor's terminal, otherwise the GNOME Terminal tab.
+  local editor tab_id
+  editor=$(host_editor)
+  if [[ -n "$editor" ]]; then tab_id=""; else tab_id=$(terminal_tab_id); fi
+
+  local title body
+  title=$(folder_title "$cwd" "$app")
+  body="$message · sound: $(basename "$sound" ".$SOUND_EXT")"
+
+  nohup "$SELF" __loop "$dir" "$(resolve_sound "$sound")" "$title" "$body" "$tab_id" "$app" "$editor" "$cwd" \
+    </dev/null >/dev/null 2>&1 &
+  echo $! > "$dir/loop.pid"
+  disown 2>/dev/null
+  return 0
+}
+
+cmd_stop() {
+  local session="" end=0
+  while (( $# )); do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      --end)     end=1; shift ;;
+      *) echo "agent-callback: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  session=$(sanitize "${session:-$(terminal_tab_id)}"); session="${session:-default}"
+  local dir="$STATE_ROOT/$session"
+  [[ -d "$dir" ]] || return 0
+  stop_dir "$dir"
+  (( end )) && rm -rf "$dir"
+  return 0
+}
+
+cmd_hush() {
+  local d
+  for d in "$STATE_ROOT"/*/; do [[ -d "$d" ]] && stop_dir "${d%/}"; done
+  echo "agent-callback: all alerts silenced."
+}
+
+cmd_status() {
+  local d state
+  for d in "$STATE_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    if is_ours "$(cat "$d/loop.pid" 2>/dev/null)" 'agent-callback __loop'; then state="alerting"; else state="idle"; fi
+    printf '%-40s sound=%-22s %s\n' "$(basename "$d")" "$(cat "$d/sound" 2>/dev/null)" "$state"
+  done
+}
+
+case "$1" in
+  __loop) shift; run_loop "$@" ;;
+  __focus) shift; focus_editor "$@" ;;
+  start)  shift; cmd_start "$@" ;;
+  stop)   shift; cmd_stop "$@" ;;
+  hush)   cmd_hush ;;
+  status) cmd_status ;;
+  -h|--help|"") sed -n '2,/^$/s/^# \{0,1\}//p' "$SELF" ;;
+  *) echo "agent-callback: unknown command '$1' (try --help)" >&2; exit 2 ;;
+esac
