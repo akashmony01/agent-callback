@@ -5,8 +5,9 @@
 You start a long task in Claude Code, walk away, and it sits there for 20 minutes
 waiting for a "yes" on a permission prompt. agent-callback fixes that:
 
-- 🔔 **Desktop notification** that stays on screen until you deal with it, titled
-  with the project folder so you know *which* session needs you.
+- 🔔 **Desktop notification** titled with the project folder so you know *which*
+  session needs you. It removes itself after a minute (no pile-up in your
+  notification list) and comes back with each later burst of chimes.
 - 🎵 **Gentle chime bursts**, not an endless alarm: 30 s right away, 60 s after
   5 minutes, 90 s after 10 more minutes, then silence.
 - 🎹 **A different sound per session**, so with several sessions open you can
@@ -71,6 +72,7 @@ Set these as environment variables before starting Claude Code, or put them in t
 | `AGENT_CALLBACK_AWAY_SECONDS` | `900` | Idle this long = away; bursts after the first are skipped |
 | `AGENT_CALLBACK_SOUND` | *(rotates)* | Force one sound for all sessions: a name (`bell`, `Glass`) or a file path |
 | `AGENT_CALLBACK_MAX_SECONDS` | `3600` | Hard limit for one alert |
+| `AGENT_CALLBACK_NOTIFY_SECONDS` | `60` | How long the notification stays before removing itself (it comes back with each later burst). `0` keeps it until you dismiss it |
 | `AGENT_CALLBACK_STATE_DIR` | `~/.local/state/agent-callback` | Where per-session state lives |
 | `AGENT_CALLBACK_EDITOR` | *(auto)* | Editor command to focus when the notification is clicked (`code`, `cursor`, `codium`, `windsurf`); auto-detected |
 | `AGENT_CALLBACK_LOG` | *(off)* | File to log every hook call and click-to-focus decision to, for troubleshooting |

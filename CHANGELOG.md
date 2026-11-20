@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+- Notifications no longer stay in the desktop's notification list. Each one now
+  removes itself after `AGENT_CALLBACK_NOTIFY_SECONDS` (default 60; `0` keeps the old
+  stay-until-dismissed behaviour), is marked transient so KDE, GNOME and others don't
+  keep it in their history, and comes back with each later burst of chimes.
+- When an alert gave up (`AGENT_CALLBACK_MAX_SECONDS`), its notification was left open.
+
 ## 0.2.0
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "agent-callback",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Calls you back to Claude Code when it's waiting on you: a desktop notification plus gentle bursts of chimes, a distinct sound per session, silent when you're away.",
   "author": {
     "name": "akashmony01",

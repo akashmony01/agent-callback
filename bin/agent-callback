@@ -20,6 +20,8 @@
 #   AGENT_CALLBACK_SCHEDULE       "wait:duration" seconds per burst (default "0:30 300:60 600:90")
 #   AGENT_CALLBACK_AWAY_SECONDS   idle this long = away; skip bursts after the first (default 900)
 #   AGENT_CALLBACK_MAX_SECONDS    give up entirely after this many seconds (default 3600)
+#   AGENT_CALLBACK_NOTIFY_SECONDS how long each notification stays before closing itself;
+#                                 shown again at every later burst (default 60, 0 = until dismissed)
 #   AGENT_CALLBACK_STATE_DIR      where per-session state lives (default ~/.local/state/agent-callback)
 #   AGENT_CALLBACK_EDITOR         editor CLI to focus on click (auto: code, cursor, codium, windsurf)
 #   AGENT_CALLBACK_LOG            file to log hook calls and click-to-focus decisions to
@@ -407,15 +409,25 @@ run_loop() {
   delay="${AGENT_CALLBACK_DELAY:-10}"
   [[ "$delay" =~ ^[0-9]+$ ]] && (( delay > 0 )) && pause "$delay"
 
-  # Persistent notification. When you close it or click it, the notifier
-  # exits 0 and we silence this session. "stop" sends it SIGTERM, which
-  # makes it close the popup itself (GNOME only lets the creator close it).
-  if (( ! IS_MAC )) && python3 -c 'import gi' 2>/dev/null; then
+  # The notification. When you close it or click it, the notifier exits 0
+  # and we silence this session. "stop" sends it SIGTERM, which makes it close
+  # the popup itself (GNOME only lets the creator close it). After
+  # AGENT_CALLBACK_NOTIFY_SECONDS it closes itself (exit 2) so it doesn't
+  # linger in the notification list; each later burst shows it again.
+  local notify_secs="${AGENT_CALLBACK_NOTIFY_SECONDS:-60}"
+  [[ "$notify_secs" =~ ^[0-9]+$ ]] || notify_secs=60
+  local linux_notify=0
+  (( ! IS_MAC )) && python3 -c 'import gi' 2>/dev/null && linux_notify=1
+  show_notification() {
+    is_ours "$(cat "$dir/notify.pid" 2>/dev/null)" 'agent-callback-notify\.py' && return 0
     (
-      python3 "$LIB_DIR/agent-callback-notify.py" "$dir/notify.pid" "$app" "$title" "$body" "$SELF" __focus "$dir" \
-        2>"$dir/notify.err" \
+      python3 "$LIB_DIR/agent-callback-notify.py" "$dir/notify.pid" "$app" "$title" "$body" "$notify_secs" \
+        "$SELF" __focus "$dir" 2>"$dir/notify.err" \
         && [[ "$(cat "$dir/loop.pid" 2>/dev/null)" == "$me" ]] && kill -TERM "$me" 2>/dev/null
     ) &
+  }
+  if (( linux_notify )); then
+    show_notification
   elif (( IS_MAC )) && command -v terminal-notifier >/dev/null; then
     # Clicking activates the app the agent runs in and silences this session.
     local bundle; bundle=$(fget "$dir" mac_bundle)
@@ -438,6 +450,7 @@ run_loop() {
     burst=$(( burst + 1 ))
     screen_locked && continue                                    # locked = left, stay silent
     (( burst > 1 && $(idle_seconds) >= away )) && continue       # long idle = away
+    (( burst > 1 && linux_notify )) && show_notification         # back on screen with the chimes
     end=$(( $(date +%s) + dur ))
     while (( $(date +%s) < end )) && ! screen_locked; do
       play_once "$file" &
@@ -452,6 +465,9 @@ run_loop() {
   # until the notification is closed, the session resumes, or max time.
   remaining=$(( deadline - $(date +%s) ))
   (( remaining > 0 )) && pause "$remaining"
+  # Gave up: take the notification down too, so it doesn't stay behind.
+  local notifier; notifier=$(cat "$dir/notify.pid" 2>/dev/null)
+  is_ours "$notifier" 'agent-callback-notify\.py' && kill "$notifier" 2>/dev/null
   [[ "$(cat "$dir/loop.pid" 2>/dev/null)" == "$me" ]] && rm -f "$dir/loop.pid"
   exit 0
 }
