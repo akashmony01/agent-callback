@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Persistent desktop notification for agent-callback (Linux).
 
-Usage: agent-callback-notify.py <pidfile> <app> <title> <body> [terminal-tab-id] [on-click command...]
+Usage: agent-callback-notify.py <pidfile> <app> <title> <body> [on-click command...]
 
 Shows a critical notification with a "Stop sound" button and blocks until the
-user closes it or clicks it (exit 0). Clicking the body also brings the
-GNOME Terminal tab that runs the session to the front, or runs the on-click
-command (used to raise a code editor's window). On SIGTERM it closes the
-notification itself (exit 1) -- GNOME only lets the creating process close it.
+user closes it or clicks it (exit 0). Clicking the body also runs the on-click
+command (agent-callback __focus, which brings the session's terminal tab or
+editor window to the front). On SIGTERM it closes the notification itself
+(exit 1) -- GNOME only lets the creating process close it.
+
+Works with any freedesktop notification server (GNOME, KDE Plasma, Cinnamon,
+XFCE's xfce4-notifyd, MATE, dunst, mako, ...).
 """
 import os
 import signal
@@ -19,17 +22,24 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
+try:  # GLib >= 2.80 moved unix_signal_add here
+    gi.require_version("GLibUnix", "2.0")
+    from gi.repository import GLibUnix  # noqa: E402
+    unix_signal_add = GLibUnix.signal_add
+except (ImportError, ValueError):
+    unix_signal_add = GLib.unix_signal_add
+
 BUS, PATH = "org.freedesktop.Notifications", "/org/freedesktop/Notifications"
 
 pidfile, app, title, body = sys.argv[1:5]
-tab_id = sys.argv[5] if len(sys.argv) > 5 else ""
-on_click = sys.argv[6:]
+on_click = sys.argv[5:]
 with open(pidfile, "w") as f:
     f.write(str(os.getpid()))
 
 conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 loop = GLib.MainLoop()
 result = {"code": 0}
+activation_token = {"value": ""}
 
 
 def call(method, params, reply=None):
@@ -51,27 +61,29 @@ nid = call(
 ).unpack()[0]
 
 
-def focus_terminal_tab():
-    # Same call GNOME's Activities search uses to jump to a terminal tab.
-    try:
-        conn.call_sync("org.gnome.Terminal", "/org/gnome/Terminal/SearchProvider",
-                       "org.gnome.Shell.SearchProvider2", "ActivateResult",
-                       GLib.Variant("(sasu)", (tab_id, [], 0)), None,
-                       Gio.DBusCallFlags.NONE, 2000, None)
-    except GLib.Error:
-        pass
+def run_on_click():
+    if not on_click:
+        return
+    env = dict(os.environ)
+    # Notification spec 1.2: the server hands us a token that lets the program
+    # we start raise a window on Wayland (and a startup id on X11).
+    if activation_token["value"]:
+        env["XDG_ACTIVATION_TOKEN"] = activation_token["value"]
+        env["DESKTOP_STARTUP_ID"] = activation_token["value"]
+    subprocess.Popen(on_click, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def on_signal(_c, _s, _p, _i, signal_name, params):
-    if params.unpack()[0] != nid:
+    args = params.unpack()
+    if args[0] != nid:
         return
+    if signal_name == "ActivationToken":
+        activation_token["value"] = args[1]
+        return  # always sent just before ActionInvoked
     if signal_name == "ActionInvoked":
-        if params.unpack()[1] == "default":
-            if on_click:
-                subprocess.Popen(on_click, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-            elif tab_id:
-                focus_terminal_tab()
+        if args[1] == "default":
+            run_on_click()
         try:
             call("CloseNotification", GLib.Variant("(u)", (nid,)))
         except GLib.Error:
@@ -79,7 +91,7 @@ def on_signal(_c, _s, _p, _i, signal_name, params):
     loop.quit()
 
 
-for name in ("NotificationClosed", "ActionInvoked"):
+for name in ("NotificationClosed", "ActionInvoked", "ActivationToken"):
     conn.signal_subscribe(BUS, BUS, name, PATH, None,
                           Gio.DBusSignalFlags.NONE, on_signal)
 
@@ -94,6 +106,6 @@ def on_term():
     return GLib.SOURCE_REMOVE
 
 
-GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, on_term)
+unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, on_term)
 loop.run()
 sys.exit(result["code"])

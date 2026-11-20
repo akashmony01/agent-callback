@@ -15,7 +15,8 @@ waiting for a "yes" on a permission prompt. agent-callback fixes that:
   bursts are skipped if you haven't touched the keyboard or mouse for 15 minutes.
 - ✋ **Stops by itself** the moment you reply, approve a permission prompt, or close
   the session. Clicking the notification takes you back to the right terminal
-  tab or code editor window (VS Code, Cursor, ...).
+  tab or code editor window (VS Code, Cursor, Konsole, GNOME Terminal, Kitty, ...)
+  on GNOME, KDE Plasma and X11 desktops.
 
 > Unofficial community project, not affiliated with or endorsed by Anthropic.
 
@@ -33,10 +34,12 @@ Or from a shell: `claude plugin marketplace add akashmony01/agent-callback && cl
 Start a new session (or run `/reload-plugins`) and you're done. Nothing is written
 to your `settings.json`.
 
-**Requirements:** `jq`, plus on Linux a sound player (`pw-play`, `paplay` or
-`aplay`), for notifications `python3-gi` and `gdbus`, and for jumping back to
-a code editor `xprop`. These are present on a
-stock Ubuntu desktop. On macOS, `afplay` is built in; install `jq` with `brew install jq`.
+**Requirements:** `jq`, `python3` with `python3-gi` (PyGObject), `gdbus`, and a
+sound player (`pw-play`, `paplay` or `aplay`). Stock Ubuntu, Fedora (GNOME or KDE)
+and Linux Mint desktops already have all of them. On X11 desktops (Mint, XFCE,
+MATE) also install `wmctrl` (or `xdotool`) so clicking a notification can raise
+the window. On macOS, `afplay` is built in; install `jq` with `brew install jq`,
+plus `brew install terminal-notifier` for clickable notifications.
 
 ### Optional: `hush` in your terminal
 
@@ -70,7 +73,7 @@ Set these as environment variables before starting Claude Code, or put them in t
 | `AGENT_CALLBACK_MAX_SECONDS` | `3600` | Hard limit for one alert |
 | `AGENT_CALLBACK_STATE_DIR` | `~/.local/state/agent-callback` | Where per-session state lives |
 | `AGENT_CALLBACK_EDITOR` | *(auto)* | Editor command to focus when the notification is clicked (`code`, `cursor`, `codium`, `windsurf`); auto-detected |
-| `AGENT_CALLBACK_LOG` | *(off)* | File to log every hook call to, for troubleshooting |
+| `AGENT_CALLBACK_LOG` | *(off)* | File to log every hook call and click-to-focus decision to, for troubleshooting |
 
 Example, chimes every 2 minutes, 20 seconds each:
 
@@ -97,59 +100,63 @@ Cursor, Aider, ...) are welcome: see `adapters/claude-code/hook.sh` for the patt
 
 ## Where it works
 
-### Operating systems
+### Operating systems and desktops
 
-| Platform | Sound | Notification | Click to jump back | Locked / away detection |
-|---|---|---|---|---|
-| Ubuntu 24.04, GNOME 46 (Wayland) | ✅ tested | ✅ tested | ✅ tested (see below) | ✅ tested |
-| Other GNOME-based Linux | ✅ should work | ✅ should work | ✅ should work | ✅ should work |
-| Other Linux desktops (KDE, XFCE, ...) | ✅ | ✅ needs a freedesktop notification server | ❌ | ❌ always treated as "present" |
-| macOS | ⚠️ untested | ⚠️ untested, basic banner only | ❌ | ❌ |
-| Windows / WSL | ❌ not supported | ❌ | ❌ | ❌ |
+| Platform | Sound | Notification | Click jumps back | Screen-lock silence | Away (idle) detection |
+|---|---|---|---|---|---|
+| **KDE Plasma 6** (Fedora, Kubuntu, ...), Wayland or X11 | ✅ tested | ✅ tested | ✅ tested | ✅ tested | ❌ (Plasma doesn't expose idle time) |
+| **GNOME** (Ubuntu, Fedora Workstation), Wayland | ✅ tested | ✅ tested | ✅ tested (see below) | ✅ tested | ✅ tested |
+| **Cinnamon / XFCE / MATE** (Linux Mint, ...), X11 | ✅ should work | ✅ should work | 🟡 untested, needs `wmctrl` or `xdotool` | 🟡 untested | 🟡 untested, needs `xprintidle` |
+| KDE Plasma 5 | ✅ | ✅ | 🟡 untested | 🟡 untested | ❌ |
+| Other Wayland compositors (Hyprland, Sway, ...) | ✅ | ✅ with a notification daemon (mako, dunst, ...) | ❌ | ❌ | ❌ |
+| macOS | 🟡 untested | 🟡 untested | 🟡 untested, needs `terminal-notifier` (focuses the app, not a tab or window) | ❌ | 🟡 untested |
+| Windows / WSL | ❌ not supported | ❌ | ❌ | ❌ | ❌ |
+
+"Away" means: after the first burst, later bursts are skipped if you haven't
+touched the keyboard or mouse for `AGENT_CALLBACK_AWAY_SECONDS`. Where idle time
+can't be read, you're always treated as present.
 
 ### Where you run your agent (clicking the notification)
 
-Sound and the notification work wherever the agent runs. What differs is
-where a click on the notification takes you:
+| Running in | Click takes you to | KDE Plasma | GNOME | X11 desktops |
+|---|---|---|---|---|
+| **VS Code** terminal | the VS Code window with your project | ✅ tested | ✅ tested (X11/XWayland VS Code, see below) | 🟡 untested |
+| **Cursor / VSCodium / Windsurf / VS Code Insiders** terminal | that editor's window with your project | 🟡 untested | ✅ Cursor tested, others untested | 🟡 untested |
+| **Konsole** | the exact tab | ✅ tested | ❌ (switches the tab, can't raise the window) | 🟡 untested |
+| **GNOME Terminal** | the exact tab (GNOME first shows a "Terminal is ready" prompt; click it) | 🟡 untested | ✅ tested | 🟡 untested |
+| **Kitty** | the exact tab/window, if remote control is on (`allow_remote_control yes` and `listen_on unix:/tmp/kitty` in `kitty.conf`); otherwise the window | 🟡 untested | ❌ | 🟡 untested |
+| **WezTerm** | the exact pane | 🟡 untested | ❌ | 🟡 untested |
+| **Ptyxis, Alacritty, XFCE Terminal, MATE Terminal, Tilix, xterm, ...** | the terminal window (not a specific tab) | 🟡 untested | ❌ | 🟡 untested |
+| tmux / screen | the terminal window tmux runs in is not found | ❌ | ❌ | ❌ |
+| JetBrains IDEs, Zed, Sublime Text | nothing | ❌ | ❌ | ❌ |
+| macOS: Terminal, iTerm2, VS Code, WezTerm, Ghostty | that app (needs `terminal-notifier`) | | | 🟡 untested |
 
-| Running in | Click takes you to | Status |
-|---|---|---|
-| **GNOME Terminal** | GNOME shows a "Terminal is ready" prompt; click it to land on the exact tab | ✅ tested |
-| **VS Code** (snap or .deb) terminal | the VS Code window with your project | ✅ tested |
-| **Cursor** terminal | the Cursor window with your project | ✅ tested |
-| **VSCodium** terminal | the VSCodium window with your project | 🟡 built in, untested |
-| **Windsurf** terminal | the Windsurf window with your project | 🟡 built in, untested |
-| **VS Code Insiders** terminal | the Insiders window with your project | 🟡 built in, untested |
-| PyCharm / IntelliJ / other JetBrains IDEs | nothing (the notification just closes) | ❌ not supported yet |
-| Zed, Sublime Text, Atom, other editors | nothing | ❌ not supported (Atom is discontinued) |
-| Other terminals (Kitty, Alacritty, Konsole, tmux, ...) | nothing | ❌ not supported |
-| vim / Neovim / Emacs inside GNOME Terminal | the GNOME Terminal tab | ✅ same as GNOME Terminal |
+On GNOME, apps that run as native Wayland windows can't be raised by another
+program, so there clicking only works for GNOME Terminal and for editors
+running under XWayland (see below). KDE and X11 desktops don't have that limit.
 
-**Requirements for the code editors:**
+**Code editors (VS Code, Cursor, ...):**
 
-- The editor's command must be on your `PATH`: `code`, `cursor`, `codium`,
-  `windsurf` or `code-insiders`. VS Code installs `code` for you. For Cursor
-  run *"Shell Command: Install 'cursor' command"* from its command palette, or
-  make a small `cursor` script that starts the AppImage.
-- `xprop` (package `x11-utils`, installed on stock Ubuntu).
-- The editor must run under X11/XWayland, which is the default for all of
-  them. If you force one to native Wayland (`--ozone-platform=wayland`), its
-  window titles can't be read and clicking does nothing.
-
-**Known limits with the code editors:**
-
+- The editor's command must be on your `PATH` on GNOME and X11 desktops
+  (`code`, `cursor`, `codium`, `windsurf` or `code-insiders`). VS Code installs
+  `code` for you. For Cursor run *"Shell Command: Install 'cursor' command"*
+  from its command palette, or make a small `cursor` script that starts the
+  AppImage. KDE doesn't need it.
 - It brings the right **window** forward, not a particular terminal tab or
   chat panel inside it.
-- The session's folder must be the project folder or inside it. If no open
-  window has it, clicking does nothing (on purpose, so it never opens a new
-  window you didn't ask for).
+- With **one** window of that editor open, that window is raised. With
+  **several**, the one whose title shows the session's project folder (or a
+  folder above it) is raised. If none matches, nothing happens, so it never
+  jumps to the wrong project or opens a new window.
 - Projects are recognised by folder **name** in the window title. Two open
   projects with the same folder name (e.g. two `app` folders) can pick the
-  wrong one or open a new window.
-- Multi-folder workspaces (`.code-workspace`) usually aren't matched; the click
-  then does nothing.
-- If you changed VS Code's `window.title` setting so it no longer shows the
-  folder name, matching fails.
+  wrong one. Multi-folder workspaces (`.code-workspace`) usually aren't
+  matched, and a changed `window.title` setting can break matching.
+- **GNOME only:** the editor must run under X11/XWayland so its windows can
+  be read with `xprop`. Recent VS Code versions run as native Wayland apps by
+  default; to get click-to-focus on GNOME, start it with
+  `--ozone-platform=x11` (e.g. add `--ozone-platform=x11` to
+  `~/.config/code-flags.conf`, or edit the `.desktop` file).
 
 ## How it works
 
@@ -160,39 +167,47 @@ where a click on the notification takes you:
   frees its sound.
 - `agent-callback start` waits `AGENT_CALLBACK_DELAY` seconds, then shows the
   notification (`lib/agent-callback-notify.py`, a small Python/GLib program
-  that stays alive so it can close the notification later, since GNOME only lets
-  the creator close it) and plays the chime bursts in a background loop.
-  State and PIDs live in `~/.local/state/agent-callback/<session>/`.
-- **Away / locked:** idle time comes from `org.gnome.Mutter.IdleMonitor`, the
-  lock state from `org.gnome.ScreenSaver` (both over D-Bus with `gdbus`).
-- **Click → GNOME Terminal:** the tab id comes from `GNOME_TERMINAL_SCREEN`
-  and is opened through GNOME Terminal's search provider (`ActivateResult`).
-  Wayland makes GNOME show its "is ready" prompt first; there is no way around
-  that for a background program.
-- **Click → code editor:** when the alert starts, it walks up the process tree
-  from the agent to find the editor binary hosting the terminal (`code`,
-  `cursor`, ...). On click it runs `agent-callback __focus <editor> <folder>`,
-  which reads the editor's window titles with `xprop`, finds the deepest
-  folder (from the session's folder upwards) named in a title, and runs
-  `<editor> <that folder>`. The editor then focuses the window that already
-  has it open.
+  that speaks the freedesktop notification protocol and stays alive so it
+  can close the notification later, since GNOME only lets the creator close
+  it) and plays the chime bursts in a background loop. State and PIDs live in
+  `~/.local/state/agent-callback/<session>/`.
+- **Away / locked:** the lock state comes over D-Bus from GNOME, the
+  freedesktop `ScreenSaver` interface (KDE and others), Cinnamon, MATE or
+  XFCE. Idle time comes from GNOME (`org.gnome.Mutter.IdleMonitor`) or, on
+  X11, from `xprintidle` if it's installed.
+- **Remembering where you are:** when an alert starts, it records the chain
+  of parent processes from the agent upwards (the terminal or editor that
+  owns the window is one of them) and, for terminals that can switch tabs,
+  which tab: Konsole (`KONSOLE_DBUS_*`), GNOME Terminal
+  (`GNOME_TERMINAL_SCREEN`), Kitty (`KITTY_WINDOW_ID`), WezTerm
+  (`WEZTERM_PANE`). This is saved in the session's `focus` file.
+- **Clicking** runs `agent-callback __focus <state-dir>`, which first
+  switches the tab (Konsole over D-Bus, GNOME Terminal through its search
+  provider, `kitty @ focus-window`, `wezterm cli activate-pane`), then raises
+  the window that belongs to the nearest of those processes:
+  - **KDE Plasma:** loads a tiny KWin script (`lib/kwin-focus.js`) over
+    D-Bus that picks the window and activates it. Works on Wayland and X11.
+  - **X11 desktops:** reads windows with `xprop` and raises one with `wmctrl`
+    or `xdotool`. For editors it runs `<editor> <folder>` instead, which makes
+    the editor focus its own window.
+  - **GNOME:** GNOME Terminal's tab activation; editors as on X11.
+  - **macOS:** `terminal-notifier -activate <app>`; the app comes from
+    `__CFBundleIdentifier` / `TERM_PROGRAM`.
 - **Safety:** nothing goes over the network. Session ids are sanitised before
   being used as folder names. Recorded PIDs are checked against their command
-  line before being killed, so a reused PID is never hit.
+  line before being killed, so a reused PID is never hit. Terminal tab ids are
+  only used after checking that the tab really runs the agent.
 
-## Adding another editor
+## Adding another editor or terminal
 
 VS Code-based editors need one word added to the `EDITORS` list in
 `bin/agent-callback`: the name of the editor's binary, which you can see with
-`readlink /proc/<pid>/exe`, mapped to its command-line launcher. Check
-that its `WM_CLASS` (from `xprop`) contains the launcher name, then test from the
-editor's terminal. To force it without code changes, set
+`readlink /proc/<pid>/exe`. To force it without code changes, set
 `AGENT_CALLBACK_EDITOR=<launcher>`.
 
-Other editors need their own focus method. For JetBrains IDEs the likely
-route is the IDE's launcher (`pycharm <folder>`, which focuses an open
-project) with the binary name detected the same way. It's untested, so it isn't
-included. Contributions with a tested setup are welcome.
+Terminals that own their windows are found automatically through the process
+tree. Only tab switching needs code: add the terminal's tab id to
+`save_focus_info` and the switch command to `focus_session`.
 
 ## Troubleshooting
 
@@ -200,11 +215,12 @@ included. Contributions with a tested setup are welcome.
   in a terminal (after `./install.sh`), then `hush`.
 - **Not triggering in Claude Code?** Check `/hooks` lists the agent-callback hooks,
   and set `AGENT_CALLBACK_LOG=/tmp/agent-callback.log` to see every hook call.
-- **Clicking does nothing in VS Code / Cursor?** Check that the editor's
-  command works in a terminal (`code --version`, `cursor --version`), that
-  `xprop -root _NET_CLIENT_LIST` lists windows, and that the window title
-  shows your project folder name. You can test the jump directly:
-  `agent-callback __focus code ~/path/to/project`.
+- **Clicking doesn't jump back?** Set `AGENT_CALLBACK_LOG=/tmp/agent-callback.log`,
+  trigger an alert, click it, and read the `focus:` lines in the log. Then
+  check the matching row of the tables above. The session's
+  `~/.local/state/agent-callback/<session>/focus` file shows what was
+  detected (`host=editor`, `host=konsole`, ...). You can replay a click with
+  `agent-callback __focus ~/.local/state/agent-callback/<session>`.
 - **Cursor quits right after starting (AppImage)?** Some systems need it
   started with `--no-sandbox`. That's a Cursor issue, unrelated to agent-callback.
 - **Sounds keep going after you replied?** If you answer "No" to a permission
@@ -228,6 +244,20 @@ claude plugin validate ~/path/to/agent-callback  # check the manifests
 ```
 
 Inside a session, `/reload-plugins` picks up edits.
+
+### Releasing
+
+1. Bump `version` in `.claude-plugin/plugin.json` and add a section for it
+   to `CHANGELOG.md` (`## 0.2.0`).
+2. Commit, then tag and push:
+
+   ```bash
+   git tag v0.2.0 && git push origin main v0.2.0
+   ```
+
+The `Release` GitHub Action (`.github/workflows/release.yml`) checks that the
+tag matches `plugin.json`, runs syntax checks and ShellCheck, and publishes a
+GitHub release whose notes are that version's `CHANGELOG.md` section.
 
 ## License
 

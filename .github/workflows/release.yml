@@ -1,0 +1,49 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish a GitHub release for it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match plugin.json version
+        run: |
+          version=$(jq -r .version .claude-plugin/plugin.json)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag is $GITHUB_REF_NAME but .claude-plugin/plugin.json says $version"
+            exit 1
+          fi
+
+      - name: Check scripts
+        run: |
+          bash -n bin/agent-callback adapters/claude-code/hook.sh install.sh
+          python3 -m py_compile lib/agent-callback-notify.py
+          jq empty .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json
+          shellcheck -S error bin/agent-callback adapters/claude-code/hook.sh install.sh
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The "## <version>" section, up to the next "## " heading.
+          awk -v v="$version" '
+            $0 ~ "^## " { if (found) exit; if ($2 == v) { found = 1; next } }
+            found' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::No '## $version' section in CHANGELOG.md; using generated notes"
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -s notes.md ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "agent-callback $GITHUB_REF_NAME" "${notes[@]}"

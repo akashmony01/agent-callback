@@ -3,7 +3,8 @@
 #
 # When an agent (Claude Code, Codex, Cursor, ...) is waiting on you, show a
 # desktop notification and play short bursts of chimes, each session with its
-# own sound. Stops as soon as you respond. Works on Linux (GNOME) and macOS.
+# own sound. Stops as soon as you respond. Works on Linux (GNOME, KDE Plasma,
+# Cinnamon, XFCE, MATE, ...) and macOS.
 #
 # Usage:
 #   agent-callback start [--session ID] [--cwd DIR] [--message TEXT] [--app NAME]
@@ -21,12 +22,14 @@
 #   AGENT_CALLBACK_MAX_SECONDS    give up entirely after this many seconds (default 3600)
 #   AGENT_CALLBACK_STATE_DIR      where per-session state lives (default ~/.local/state/agent-callback)
 #   AGENT_CALLBACK_EDITOR         editor CLI to focus on click (auto: code, cursor, codium, windsurf)
+#   AGENT_CALLBACK_LOG            file to log hook calls and click-to-focus decisions to
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB_DIR="$(dirname "$(dirname "$SELF")")/lib"
 STATE_ROOT="${AGENT_CALLBACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-callback}"
+IS_MAC=0; [[ "$(uname)" == "Darwin" ]] && IS_MAC=1
 
-if [[ "$(uname)" == "Darwin" ]]; then
+if (( IS_MAC )); then
   SOUNDS=(Glass Sosumi Ping Pop Funk Hero)
   SOUND_DIR="/System/Library/Sounds"; SOUND_EXT="aiff"
 else
@@ -35,6 +38,8 @@ else
 fi
 
 # ---------------------------------------------------------------- helpers
+
+log() { [[ -n "$AGENT_CALLBACK_LOG" ]] && echo "$(date '+%F %T') $*" >> "$AGENT_CALLBACK_LOG"; return 0; }
 
 # Play one file, cut off after ~1.5s so every chime is short.
 play_once() {
@@ -51,75 +56,271 @@ resolve_sound() {
   if [[ -f "$1" ]]; then echo "$1"; else echo "$SOUND_DIR/$1.$SOUND_EXT"; fi
 }
 
+dbus_call() { # dest path method [args...]  (method includes the interface)
+  local dest="$1" path="$2" method="$3"; shift 3
+  gdbus call --session --dest "$dest" --object-path "$path" --method "$method" "$@" 2>/dev/null
+}
+
 # Seconds since the last keyboard/mouse input (0 if unknown).
 idle_seconds() {
   local ms
-  if [[ "$(uname)" == "Darwin" ]]; then
+  if (( IS_MAC )); then
     ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print int($NF / 1000000000); exit}'
     return
   fi
-  ms=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
-         --object-path /org/gnome/Mutter/IdleMonitor/Core \
-         --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null \
-       | sed -n 's/.*uint64 \([0-9]*\).*/\1/p')
-  echo $(( ${ms:-0} / 1000 ))
+  ms=$(dbus_call org.gnome.Mutter.IdleMonitor /org/gnome/Mutter/IdleMonitor/Core \
+         org.gnome.Mutter.IdleMonitor.GetIdletime | sed -n 's/.*uint64 \([0-9]*\).*/\1/p')
+  # X11 desktops (Cinnamon, XFCE, MATE, KDE on X11) with xprintidle installed.
+  [[ -z "$ms" && -n "$DISPLAY" ]] && command -v xprintidle >/dev/null && ms=$(xprintidle 2>/dev/null)
+  [[ "$ms" =~ ^[0-9]+$ ]] || ms=0
+  echo $(( ms / 1000 ))
 }
 
-# True while the screen is locked (GNOME). Unknown counts as unlocked.
+# True while the screen is locked. Asks GNOME, then the freedesktop interface
+# (KDE Plasma and others), then Cinnamon, MATE and XFCE. Unknown = unlocked.
 screen_locked() {
-  [[ "$(uname)" == "Darwin" ]] && return 1
-  gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
-    --method org.gnome.ScreenSaver.GetActive 2>/dev/null | grep -q true
+  (( IS_MAC )) && return 1
+  local svc out
+  for svc in "org.gnome.ScreenSaver /org/gnome/ScreenSaver" \
+             "org.freedesktop.ScreenSaver /ScreenSaver" \
+             "org.cinnamon.ScreenSaver /org/cinnamon/ScreenSaver" \
+             "org.mate.ScreenSaver /org/mate/ScreenSaver" \
+             "org.xfce.ScreenSaver /org/xfce/ScreenSaver"; do
+    out=$(dbus_call "${svc% *}" "${svc#* }" "${svc% *}.GetActive") || continue
+    [[ "$out" == *true* ]]; return
+  done
+  return 1
 }
 
-# GNOME Terminal tab running this process (used to jump back on click).
-terminal_tab_id() {
-  local id="${GNOME_TERMINAL_SCREEN##*/}"
-  echo "${id//_/-}"
+# A stable id for the terminal tab this runs in (used when --session is left out).
+terminal_session_id() {
+  local id
+  if [[ -n "$GNOME_TERMINAL_SCREEN" ]]; then id="${GNOME_TERMINAL_SCREEN##*/}"; echo "${id//_/-}"
+  elif [[ -n "$KONSOLE_DBUS_SESSION" ]]; then echo "konsole-${KONSOLE_DBUS_SERVICE}-${KONSOLE_DBUS_SESSION##*/}"
+  elif [[ -n "$KITTY_WINDOW_ID" ]]; then echo "kitty-${KITTY_PID}-${KITTY_WINDOW_ID}"
+  elif [[ -n "$WEZTERM_PANE" ]]; then echo "wezterm-${WEZTERM_PANE}"
+  elif [[ -n "$ITERM_SESSION_ID" ]]; then echo "iterm-${ITERM_SESSION_ID#*:}"
+  elif [[ -n "$TERM_SESSION_ID" ]]; then echo "term-${TERM_SESSION_ID}"
+  else id=$(tty 2>/dev/null); [[ "$id" == /dev/* ]] && echo "tty-${id#/dev/}"
+  fi
 }
+
+# ---------------------------------------------------------------- where to jump back to
+#
+# When an alert starts we record, in <state>/<session>/focus, what hosts the
+# agent: the chain of parent processes (the terminal or editor window belongs
+# to one of them) and, for terminals that can switch tabs, which tab. When
+# the notification is clicked, `agent-callback __focus <state-dir>` switches
+# to that tab and raises the window, using what the desktop allows:
+#   KDE Plasma  -> a short KWin script (works on Wayland and X11)
+#   X11         -> wmctrl / xdotool (Cinnamon, XFCE, MATE, ...); editors via "<cli> <folder>"
+#   GNOME       -> GNOME Terminal's own tab activation; editors via "<cli> <folder>"
+#   macOS       -> terminal-notifier activates the app (see run_loop)
 
 # Code editors whose built-in terminal we can jump back to. The binary that
-# hosts the terminal has the same name as the editor's command-line launcher,
-# and all are VS Code based, so "<cli> <folder>" brings the window with that
-# folder to the front.
+# hosts the terminal has the same name as the editor's command-line launcher.
 EDITORS="code code-insiders cursor codium windsurf"
 
-# Editor whose terminal runs this process (empty for a plain terminal).
-# Found by walking up the process tree to the editor's own binary.
-host_editor() {
-  [[ -n "$AGENT_CALLBACK_EDITOR" ]] && { echo "$AGENT_CALLBACK_EDITOR"; return; }
-  [[ "$(uname)" == "Darwin" ]] && return 0
-  local pid=$$ name
+# Parent process ids, nearest first (Linux).
+ancestor_pids() {
+  local pid=$$ out=()
   while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )); do
-    name=$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null)")
-    [[ -n "$name" && " $EDITORS " == *" $name "* ]] && { echo "$name"; return; }
+    out+=("$pid")
     pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null)
   done
+  echo "${out[*]}"
 }
 
-# agent-callback __focus <editor-cli> <folder>  (run when the notification is clicked)
-# Bring the editor window holding <folder> to the front. Window titles look
-# like "file - project - Visual Studio Code", so find the deepest folder
-# (from <folder> upwards) named in one of the editor's window titles and open
-# that: the editor focuses the window that already has it. No match means the
-# project isn't open (or titles can't be read), and we do nothing rather than
-# open a new window.
-focus_editor() {
-  local cli="$1" dir="$2" titles="" w class
-  command -v "$cli" >/dev/null && command -v xprop >/dev/null || return 0
-  local key="${cli%-insiders}"; key="${key/codium/vscodium}"
-  for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -o '0x[0-9a-f]*'); do
-    class=$(xprop -id "$w" WM_CLASS 2>/dev/null)
-    [[ "$(tr 'A-Z' 'a-z' <<<"$class")" == *"$key"* ]] || continue
-    titles+=$'\n'$(xprop -id "$w" _NET_WM_NAME 2>/dev/null | sed -n 's/^[^"]*"\(.*\)"$/ - \1 - /p')
+# What hosts this process: "<kind> <name>", kind is editor, konsole,
+# gnome-terminal, kitty, wezterm or other. Found by walking up the process tree.
+detect_host() {
+  [[ -n "$AGENT_CALLBACK_EDITOR" ]] && { echo "editor $AGENT_CALLBACK_EDITOR"; return; }
+  local pid name
+  for pid in $1; do
+    name=$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null)")
+    [[ -z "$name" ]] && continue
+    [[ " $EDITORS " == *" $name "* ]] && { echo "editor $name"; return; }
+    case "$name" in
+      konsole)               echo "konsole konsole"; return ;;
+      gnome-terminal-server) echo "gnome-terminal gnome-terminal"; return ;;
+      kitty)                 echo "kitty kitty"; return ;;
+      wezterm-gui)           echo "wezterm wezterm"; return ;;
+    esac
   done
-  while [[ "$dir" == /?* ]]; do
-    if [[ "$titles" == *" - ${dir##*/} - "* || "$titles" == *" - ${dir##*/} (Workspace) - "* ]]; then
-      setsid "$cli" "$dir" </dev/null >/dev/null 2>&1 &
-      return 0
+  echo "other -"
+}
+
+# macOS app to activate on click.
+mac_bundle_id() {
+  [[ -n "$__CFBundleIdentifier" ]] && { echo "$__CFBundleIdentifier"; return; }
+  case "$TERM_PROGRAM" in
+    Apple_Terminal) echo com.apple.Terminal ;;
+    iTerm.app)      echo com.googlecode.iterm2 ;;
+    vscode)         echo com.microsoft.VSCode ;;
+    WezTerm)        echo com.github.wez.wezterm ;;
+    ghostty)        echo com.mitchellh.ghostty ;;
+  esac
+}
+
+# Write <dir>/focus: one key=value per line (read back by fget, never sourced).
+save_focus_info() {
+  local dir="$1" cwd="${2//$'\n'/}" pids host
+  {
+    if (( IS_MAC )); then
+      echo "mac_bundle=$(mac_bundle_id)"
+    else
+      pids=$(ancestor_pids)
+      host=$(detect_host "$pids")
+      echo "pids=$pids"
+      echo "host=${host% *}"
+      [[ "${host% *}" == editor ]] && echo "editor=${host#* }"
+      echo "cwd=$cwd"
+      echo "konsole_service=$KONSOLE_DBUS_SERVICE"
+      echo "konsole_window=$KONSOLE_DBUS_WINDOW"
+      echo "konsole_session=$KONSOLE_DBUS_SESSION"
+      echo "gnome_tab=$(id="${GNOME_TERMINAL_SCREEN##*/}"; echo "${id//_/-}")"
+      echo "kitty_window=$KITTY_WINDOW_ID"
+      echo "kitty_pid=$KITTY_PID"
+      echo "kitty_to=$KITTY_LISTEN_ON"
+      echo "wezterm_pane=$WEZTERM_PANE"
+      echo "wezterm_socket=$WEZTERM_UNIX_SOCKET"
     fi
-    dir="${dir%/*}"
+  } > "$dir/focus"
+}
+
+# fget <dir> <key>: one value from <dir>/focus.
+fget() { sed -n "s/^$2=//p" "$1/focus" 2>/dev/null | head -1; }
+
+kwin_available() {
+  gdbus introspect --session --dest org.kde.KWin --object-path /Scripting >/dev/null 2>&1
+}
+
+# kwin_raise <js-file> <pids> <class-key> [hints...]
+kwin_raise() {
+  local js="$1" pids="$2" key="$3" name="agent-callback-focus-$$" out id; shift 3
+  python3 - "$pids" "$key" "$@" > "$js" <<'PY' || return 1
+import json, sys
+print("var ARGS = %s;" % json.dumps({"pids": [int(p) for p in sys.argv[1].split()],
+                                     "key": sys.argv[2], "hints": sys.argv[3:]}))
+PY
+  cat "$LIB_DIR/kwin-focus.js" >> "$js"
+  out=$(dbus_call org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$js" "$name") || return 1
+  id=$(grep -oE -- '-?[0-9]+' <<<"$out" | head -1)
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  dbus_call org.kde.KWin "/Scripting/Script$id" org.kde.kwin.Script.run >/dev/null ||  # Plasma 6
+    dbus_call org.kde.KWin "/$id" org.kde.kwin.Script.run >/dev/null                   # Plasma 5
+  sleep 1
+  dbus_call org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript "$name" >/dev/null
+  rm -f "$js"
+  log "focus: kwin script ran (pids=$pids key=$key hints=$*)"
+}
+
+# x11_raise <editor-cli> <pids> <class-key> [hint dir]...
+# Same choice as the KWin script, on X11 windows read with xprop. Editors are
+# raised with "<cli> <folder>" when a folder matched (the editor then focuses
+# its own window, which GNOME allows); anything else with wmctrl or xdotool.
+x11_raise() {
+  local cli="$1" pids="$2" key="$3"; shift 3
+  [[ -n "$DISPLAY" ]] && command -v xprop >/dev/null || return 1
+  local -a ids=() wpids=() classes=() titles=() cands=() hints=() dirs=()
+  local w p i chosen="" chosen_dir=""
+  while (( $# >= 2 )); do hints+=("$1"); dirs+=("$2"); shift 2; done
+  for w in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -o '0x[0-9a-f]*'); do
+    ids+=("$w")
+    wpids+=("$(xprop -id "$w" _NET_WM_PID 2>/dev/null | grep -o '[0-9]*$')")
+    classes+=("$(xprop -id "$w" WM_CLASS 2>/dev/null | tr 'A-Z' 'a-z')")
+    titles+=("$(xprop -id "$w" _NET_WM_NAME 2>/dev/null | sed -n 's/^[^"]*"\(.*\)"$/\1/p')")
   done
+  for p in $pids; do
+    for i in "${!ids[@]}"; do [[ "${wpids[$i]}" == "$p" ]] && cands+=("$i"); done
+    (( ${#cands[@]} )) && break
+  done
+  if (( ! ${#cands[@]} )) && [[ -n "$key" ]]; then
+    for i in "${!ids[@]}"; do [[ "${classes[$i]}" == *"$key"* ]] && cands+=("$i"); done
+  fi
+  if (( ${#cands[@]} == 1 )); then
+    chosen="${cands[0]}"
+  fi
+  # Prefer a folder match even with a single window: "<cli> <folder>" is the
+  # most reliable way to raise an editor, especially on GNOME.
+  for p in "${!hints[@]}"; do
+    for i in "${cands[@]}"; do
+      if [[ " - ${titles[$i]} - " == *"${hints[$p]}"* ]]; then chosen="$i"; chosen_dir="${dirs[$p]}"; break 2; fi
+    done
+  done
+  [[ -n "$chosen" ]] || { log "focus: x11 no unique window (${#cands[@]} candidates)"; return 0; }
+  if [[ -n "$cli" && -n "$chosen_dir" ]] && command -v "$cli" >/dev/null; then
+    log "focus: x11 $cli $chosen_dir"
+    setsid "$cli" "$chosen_dir" </dev/null >/dev/null 2>&1 &
+  elif command -v wmctrl >/dev/null; then
+    log "focus: x11 wmctrl ${ids[$chosen]}"; wmctrl -i -a "${ids[$chosen]}"
+  elif command -v xdotool >/dev/null; then
+    log "focus: x11 xdotool ${ids[$chosen]}"; xdotool windowactivate "${ids[$chosen]}"
+  else
+    log "focus: x11 found ${ids[$chosen]} but neither wmctrl nor xdotool is installed"
+  fi
+}
+
+# agent-callback __focus <state-dir>  (run when the notification is clicked)
+focus_session() {
+  local dir="$1" host pids cli="" key="" d svc sess title tab win kpid
+  local -a hints=() pairs=()
+  host=$(fget "$dir" host); pids=$(fget "$dir" pids)
+  log "focus: host=$host editor=$(fget "$dir" editor) cwd=$(fget "$dir" cwd)"
+
+  # 1. Switch to the right tab inside the terminal. For an unrecognised host
+  # each is tried, but only when it's verified to run our process (terminal
+  # env vars leak into programs started from that terminal).
+  if [[ "$host" == konsole || "$host" == other ]]; then
+    svc=$(fget "$dir" konsole_service); sess=$(fget "$dir" konsole_session); win=$(fget "$dir" konsole_window)
+    if [[ -n "$svc" && -n "$sess" && -n "$win" ]] &&
+       [[ " $pids " == *" $(dbus_call "$svc" "$sess" org.kde.konsole.Session.processId | grep -o '[0-9]\+' | head -1) "* ]]; then
+      dbus_call "$svc" "$win" org.kde.konsole.Window.setCurrentSession "${sess##*/}" >/dev/null
+      title=$(dbus_call "$svc" "$sess" org.kde.konsole.Session.title 1 | sed -n "s/^('\(.*\)',)$/\1/p")
+      [[ -n "$title" ]] && hints+=("$title")
+      log "focus: konsole tab ${sess##*/} ($title)"
+    fi
+  fi
+  if [[ "$host" == gnome-terminal || "$host" == other ]]; then
+    # Same call GNOME's Activities search uses to jump to a terminal tab.
+    tab=$(fget "$dir" gnome_tab)
+    [[ -n "$tab" ]] && dbus_call org.gnome.Terminal /org/gnome/Terminal/SearchProvider \
+      org.gnome.Shell.SearchProvider2.ActivateResult "$tab" "[]" 0 >/dev/null
+  fi
+  if [[ "$host" == kitty || "$host" == other ]]; then
+    # Needs remote control (allow_remote_control + listen_on in kitty.conf).
+    win=$(fget "$dir" kitty_window); kpid=$(fget "$dir" kitty_pid); svc=$(fget "$dir" kitty_to)
+    if [[ -n "$win" && -n "$svc" && " $pids " == *" $kpid "* ]] && command -v kitty >/dev/null; then
+      kitty @ --to "$svc" focus-window --match "id:$win" >/dev/null 2>&1
+    fi
+  fi
+  if [[ "$host" == wezterm ]]; then
+    tab=$(fget "$dir" wezterm_pane)
+    [[ -n "$tab" ]] && command -v wezterm >/dev/null &&
+      WEZTERM_UNIX_SOCKET=$(fget "$dir" wezterm_socket) wezterm cli activate-pane --pane-id "$tab" >/dev/null 2>&1
+  fi
+
+  # 2. Raise the window. For editors, the project folder (from the session's
+  # folder upwards) in the window title picks between several windows.
+  if [[ "$host" == editor ]]; then
+    cli=$(fget "$dir" editor)
+    key="${cli%-insiders}"; key="${key/codium/vscodium}"
+    d=$(fget "$dir" cwd)
+    while [[ "$d" == /?* ]]; do
+      hints+=(" - ${d##*/} - " " - ${d##*/} (Workspace) - ")
+      pairs+=(" - ${d##*/} - " "$d" " - ${d##*/} (Workspace) - " "$d")
+      d="${d%/*}"
+    done
+  else
+    for title in "${hints[@]}"; do pairs+=("$title" ""); done
+  fi
+  [[ -n "$pids" ]] || return 0
+  if kwin_available; then
+    kwin_raise "$dir/focus.js" "$pids" "$key" "${hints[@]}"
+  else
+    x11_raise "$cli" "$pids" "$key" "${pairs[@]}"
+  fi
+  return 0
 }
 
 # Session IDs become directory names: keep them safe.
@@ -182,13 +383,17 @@ stop_dir() {
   is_ours "$player" 'afplay|pw-play|paplay|aplay|timeout' && kill "$player" 2>/dev/null
   # Close the desktop notification too (the notifier closes it on SIGTERM).
   is_ours "$notifier" 'agent-callback-notify\.py' && kill "$notifier" 2>/dev/null
+  # macOS: remove the terminal-notifier banner if it's still showing.
+  if (( IS_MAC )) && [[ -n "$notifier" ]] && command -v terminal-notifier >/dev/null; then
+    terminal-notifier -remove "agent-callback-$(basename "$dir")" >/dev/null 2>&1 &
+  fi
   rm -f "$dir/loop.pid" "$dir/player.pid" "$dir/notify.pid"
 }
 
 # ---------------------------------------------------------------- background loop
-# agent-callback __loop <dir> <sound-file> <title> <body> <tab-id> <app> <editor> <cwd>
+# agent-callback __loop <dir> <sound-file> <title> <body> <app>
 run_loop() {
-  local dir="$1" file="$2" title="$3" body="$4" tab_id="$5" app="$6" editor="$7" cwd="$8"
+  local dir="$1" file="$2" title="$3" body="$4" app="$5"
   local me=$$ max delay away burst step wait_s dur end remaining
   max="${AGENT_CALLBACK_MAX_SECONDS:-3600}"; [[ "$max" =~ ^[0-9]+$ ]] || max=3600
   local deadline=$(( $(date +%s) + max ))
@@ -205,14 +410,20 @@ run_loop() {
   # Persistent notification. When you close it or click it, the notifier
   # exits 0 and we silence this session. "stop" sends it SIGTERM, which
   # makes it close the popup itself (GNOME only lets the creator close it).
-  if [[ "$(uname)" != "Darwin" ]] && python3 -c 'import gi' 2>/dev/null; then
-    local on_click=()
-    [[ -n "$editor" ]] && on_click=("$SELF" __focus "$editor" "$cwd")
+  if (( ! IS_MAC )) && python3 -c 'import gi' 2>/dev/null; then
     (
-      python3 "$LIB_DIR/agent-callback-notify.py" "$dir/notify.pid" "$app" "$title" "$body" "$tab_id" "${on_click[@]}" \
+      python3 "$LIB_DIR/agent-callback-notify.py" "$dir/notify.pid" "$app" "$title" "$body" "$SELF" __focus "$dir" \
         2>"$dir/notify.err" \
         && [[ "$(cat "$dir/loop.pid" 2>/dev/null)" == "$me" ]] && kill -TERM "$me" 2>/dev/null
     ) &
+  elif (( IS_MAC )) && command -v terminal-notifier >/dev/null; then
+    # Clicking activates the app the agent runs in and silences this session.
+    local bundle; bundle=$(fget "$dir" mac_bundle)
+    local args=(-title "$title" -subtitle "$app" -message "$body" -group "agent-callback-$(basename "$dir")"
+                -execute "$(printf '%q ' "$SELF" stop --session "$(basename "$dir")")")
+    [[ -n "$bundle" ]] && args+=(-activate "$bundle")
+    terminal-notifier "${args[@]}" >/dev/null 2>&1
+    echo "terminal-notifier" > "$dir/notify.pid"   # marks that a banner may need removing
   elif command -v osascript >/dev/null; then
     osascript -e "display notification \"${body//[\"\\]/}\" with title \"${title//[\"\\]/}\" subtitle \"${app//[\"\\]/}\"" >/dev/null 2>&1
   fi
@@ -258,7 +469,7 @@ cmd_start() {
       *) echo "agent-callback: unknown option $1" >&2; return 2 ;;
     esac
   done
-  session=$(sanitize "${session:-$(terminal_tab_id)}"); session="${session:-default}"
+  session=$(sanitize "${session:-$(terminal_session_id)}"); session="${session:-default}"
   local dir="$STATE_ROOT/$session" pid sound lock
   mkdir -p "$dir"
 
@@ -281,17 +492,14 @@ cmd_start() {
     rmdir "$lock" 2>/dev/null
   fi
 
-  # Where to send you on click: the editor window (VS Code, Cursor, ...) when
-  # running in an editor's terminal, otherwise the GNOME Terminal tab.
-  local editor tab_id
-  editor=$(host_editor)
-  if [[ -n "$editor" ]]; then tab_id=""; else tab_id=$(terminal_tab_id); fi
+  # Where to send you when the notification is clicked.
+  save_focus_info "$dir" "$cwd"
 
   local title body
   title=$(folder_title "$cwd" "$app")
   body="$message · sound: $(basename "$sound" ".$SOUND_EXT")"
 
-  nohup "$SELF" __loop "$dir" "$(resolve_sound "$sound")" "$title" "$body" "$tab_id" "$app" "$editor" "$cwd" \
+  nohup "$SELF" __loop "$dir" "$(resolve_sound "$sound")" "$title" "$body" "$app" \
     </dev/null >/dev/null 2>&1 &
   echo $! > "$dir/loop.pid"
   disown 2>/dev/null
@@ -307,7 +515,7 @@ cmd_stop() {
       *) echo "agent-callback: unknown option $1" >&2; return 2 ;;
     esac
   done
-  session=$(sanitize "${session:-$(terminal_tab_id)}"); session="${session:-default}"
+  session=$(sanitize "${session:-$(terminal_session_id)}"); session="${session:-default}"
   local dir="$STATE_ROOT/$session"
   [[ -d "$dir" ]] || return 0
   stop_dir "$dir"
@@ -332,7 +540,7 @@ cmd_status() {
 
 case "$1" in
   __loop) shift; run_loop "$@" ;;
-  __focus) shift; focus_editor "$@" ;;
+  __focus) shift; focus_session "$@" ;;
   start)  shift; cmd_start "$@" ;;
   stop)   shift; cmd_stop "$@" ;;
   hush)   cmd_hush ;;

@@ -27,7 +27,7 @@ if [[ "$1" == "--uninstall" ]]; then
 fi
 
 mkdir -p "$DEST" "$BIN"
-rm -rf "$DEST/bin" "$DEST/lib"
+rm -rf "${DEST:?}/bin" "${DEST:?}/lib"
 cp -R "$SRC/bin" "$SRC/lib" "$DEST/"
 chmod +x "$DEST/bin/agent-callback" "$DEST/lib/agent-callback-notify.py"
 
@@ -51,12 +51,20 @@ missing=()
 command -v jq >/dev/null || missing+=("jq (needed by the Claude Code adapter)")
 if [[ "$(uname)" == "Darwin" ]]; then
   command -v afplay >/dev/null || missing+=("afplay")
+  command -v terminal-notifier >/dev/null || missing+=("terminal-notifier (clickable notifications: brew install terminal-notifier)")
 else
   command -v pw-play >/dev/null || command -v paplay >/dev/null || command -v aplay >/dev/null \
     || missing+=("a sound player: pw-play, paplay or aplay")
   python3 -c 'import gi' 2>/dev/null || missing+=("python3-gi (for desktop notifications)")
-  command -v gdbus >/dev/null || missing+=("gdbus (idle/lock detection, from libglib2.0-bin)")
-  command -v xprop >/dev/null || missing+=("xprop (click-to-focus for code editors, from x11-utils)")
+  command -v gdbus >/dev/null || missing+=("gdbus (lock detection and click-to-focus, from libglib2.0-bin / glib2)")
+  if [[ "$XDG_SESSION_TYPE" == x11 || "$XDG_CURRENT_DESKTOP" == *GNOME* ]] && [[ "$XDG_CURRENT_DESKTOP" != *KDE* ]]; then
+    command -v xprop >/dev/null || missing+=("xprop (click-to-focus, from x11-utils / xprop)")
+  fi
+  if [[ "$XDG_SESSION_TYPE" == x11 && "$XDG_CURRENT_DESKTOP" != *KDE* && "$XDG_CURRENT_DESKTOP" != *GNOME* ]]; then
+    command -v wmctrl >/dev/null || command -v xdotool >/dev/null \
+      || missing+=("wmctrl or xdotool (click-to-focus on X11 desktops)")
+    command -v xprintidle >/dev/null || missing+=("xprintidle (skip chimes when you're away)")
+  fi
 fi
 (( ${#missing[@]} )) && printf 'Missing (optional but recommended):\n%s\n' "$(printf '  - %s\n' "${missing[@]}")"
 
