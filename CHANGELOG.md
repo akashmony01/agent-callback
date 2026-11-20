@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+### Added
+- Plugin icon, directory metadata (documentation and support links, keywords) and a
+  `network.hosts: []` declaration: agent-callback contacts no network hosts.
+- CI on every push and pull request (syntax checks, ShellCheck, a smoke test).
+- Contributing guide, security policy, code of conduct, issue and pull request templates.
+
 ## 0.2.1
 
 ### Fixed

@@ -1,0 +1,41 @@
+name: Bug report
+description: Something doesn't work (no sound, no notification, click doesn't jump back, ...)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agent-callback version
+      description: "`claude plugin list | grep -A1 agent-callback`"
+      placeholder: "0.2.1"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and desktop
+      description: "e.g. Fedora 45 KDE Plasma 6.8 Wayland. `echo $XDG_CURRENT_DESKTOP $XDG_SESSION_TYPE` helps."
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Where Claude Code runs
+      description: "Terminal or editor, e.g. Konsole, GNOME Terminal, VS Code 1.146, Cursor, kitty inside tmux"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Add `"AGENT_CALLBACK_LOG": "/tmp/agent-callback.log"` to the `env` block of `~/.claude/settings.json`,
+        restart Claude Code, reproduce, and paste the log. For click problems, also paste
+        `~/.local/state/agent-callback/<session>/focus` and `notify.err`.
+      render: text

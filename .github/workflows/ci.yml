@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax checks
+        run: |
+          bash -n bin/agent-callback adapters/claude-code/hook.sh install.sh
+          python3 -m py_compile lib/agent-callback-notify.py
+          jq empty .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json
+
+      - name: ShellCheck
+        run: shellcheck -S error bin/agent-callback adapters/claude-code/hook.sh install.sh
+
+      - name: Smoke test (start, status, hush, stop)
+        env:
+          AGENT_CALLBACK_STATE_DIR: ${{ runner.temp }}/agent-callback
+          AGENT_CALLBACK_DELAY: "30"
+        run: |
+          bin/agent-callback --help >/dev/null
+          bin/agent-callback start --session ci --message "CI smoke test" --app CI
+          bin/agent-callback status | grep -q '^ci .*alerting'
+          bin/agent-callback hush
+          bin/agent-callback status | grep -q '^ci .*idle'
+          bin/agent-callback stop --session ci --end
+          test ! -d "$AGENT_CALLBACK_STATE_DIR/ci"

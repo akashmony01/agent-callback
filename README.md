@@ -1,6 +1,20 @@
-# agent-callback
+<p align="center">
+  <img src="assets/icon.svg" width="112" alt="agent-callback icon: a bell with sound waves">
+</p>
 
-**Get called back to your AI coding agent when it's waiting on you.**
+<h1 align="center">agent-callback</h1>
+
+<p align="center">
+  <b>Get called back to your AI coding agent when it's waiting on you.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/akashmony01/agent-callback/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/akashmony01/agent-callback"></a>
+  <a href="https://github.com/akashmony01/agent-callback/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akashmony01/agent-callback/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/akashmony01/agent-callback"></a>
+  <img alt="Platforms: Linux and macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational">
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-8A63D2">
+</p>
 
 You start a long task in Claude Code, walk away, and it sits there for 20 minutes
 waiting for a "yes" on a permission prompt. agent-callback fixes that:
@@ -229,6 +243,13 @@ tree. Only tab switching needs code: add the terminal's tab id to
   prompt, Claude Code doesn't always fire a hook. The alert still ends after its
   last burst, or run `hush`.
 
+## Privacy and security
+
+agent-callback makes no network connections and needs no `sudo`. It runs as you,
+keeps its state in `~/.local/state/agent-callback/`, and talks only to your
+desktop (notifications, lock/idle state, raising a window). See
+[SECURITY.md](SECURITY.md) for details and how to report a vulnerability.
+
 ## Uninstall
 
 ```
@@ -261,6 +282,12 @@ The `Release` GitHub Action (`.github/workflows/release.yml`) checks that the
 tag matches `plugin.json`, runs syntax checks and ShellCheck, and publishes a
 GitHub release whose notes are that version's `CHANGELOG.md` section.
 
+## Contributing
+
+Test reports from untested desktops, adapters for other AI tools, and support
+for more terminals are very welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)

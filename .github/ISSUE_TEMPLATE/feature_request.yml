@@ -1,0 +1,10 @@
+name: Feature request
+description: Suggest an idea, a new terminal/editor, or an adapter for another AI tool
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like, and why?
+    validations:
+      required: true

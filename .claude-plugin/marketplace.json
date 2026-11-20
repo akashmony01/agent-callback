@@ -7,9 +7,20 @@
   "plugins": [
     {
       "name": "agent-callback",
-      "source": ".",
-      "description": "Desktop notification + chime bursts when Claude Code is waiting on you."
+      "source": "./",
+      "description": "Desktop notification you can click to jump back, plus gentle chime bursts, when Claude Code is waiting on you.",
+      "category": "productivity",
+      "tags": [
+        "notifications",
+        "linux",
+        "macos",
+        "kde",
+        "gnome"
+      ]
     }
   ],
-  "description": "agent-callback: get called back to your AI coding agent when it is waiting on you."
+  "description": "agent-callback: get called back to your AI coding agent when it is waiting on you.",
+  "metadata": {
+    "version": "0.2.2"
+  }
 }

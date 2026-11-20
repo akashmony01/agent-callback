@@ -1,7 +1,7 @@
 {
   "name": "agent-callback",
-  "version": "0.2.1",
-  "description": "Calls you back to Claude Code when it's waiting on you: a desktop notification plus gentle bursts of chimes, a distinct sound per session, silent when you're away.",
+  "version": "0.2.2",
+  "description": "Calls you back to Claude Code when it's waiting on you: a desktop notification you can click to jump back to the right terminal or editor, plus gentle chime bursts with a distinct sound per session. Quiet when you're away. Linux (GNOME, KDE, X11 desktops) and macOS.",
   "author": {
     "name": "akashmony01",
     "url": "https://github.com/akashmony01"
@@ -14,6 +14,19 @@
     "sound",
     "alert",
     "idle",
-    "permission"
-  ]
+    "permission",
+    "desktop-notification",
+    "linux",
+    "gnome",
+    "kde",
+    "macos",
+    "terminal",
+    "vscode"
+  ],
+  "icon": ".claude-plugin/icon.png",
+  "network": {
+    "hosts": []
+  },
+  "documentationUrl": "https://github.com/akashmony01/agent-callback#readme",
+  "supportUrl": "https://github.com/akashmony01/agent-callback/issues"
 }
